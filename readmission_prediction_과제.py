@@ -14,6 +14,8 @@ import pandas as pd
 import numpy as np
 df=pd.read_csv("/content/drive/MyDrive/기계학습/과제/diabetic_data.csv")
 
+RANDOM_STATE = 1203
+
 df
 
 len(df['readmitted'])
@@ -126,78 +128,289 @@ df.corr()
 df = df.sample(n = len(df))
 df = df.reset_index(drop = True)
 
-df_valid_test=df.sample(frac=0.30)
+df
 
-df_test = df_valid_test.sample(frac = 0.5)
-df_valid = df_valid_test.drop(df_test.index)
-df_train=df.drop(df_valid_test.index)
+# readmitted 비율 확인
+df['readmitted'].value_counts()
 
-def calc_prevalence(y_actual):
-    return (sum(y_actual)/len(y_actual))
+from sklearn.model_selection import train_test_split
 
-print('Test prevalence(n = %d):%.3f'%(len(df_test),calc_prevalence(df_test.readmitted.values)))
-print('Valid prevalence(n = %d):%.3f'%(len(df_valid),calc_prevalence(df_valid.readmitted.values)))
-print('Train all prevalence(n = %d):%.3f'%(len(df_train), calc_prevalence(df_train.readmitted.values)))
+X = df.drop('readmitted', axis=1)  # 독립 변수
+y = df['readmitted']  # 종속 변수
 
-rows_pos = df_train.readmitted == 1
-df_train_pos = df_train.loc[rows_pos]
-df_train_neg = df_train.loc[~rows_pos]
+X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.3, random_state=RANDOM_STATE)
 
-# merge the balanced data
-df_train = pd.concat([df_train_pos, df_train_neg.sample(n = len(df_train_pos))],axis = 0)
-
-# shuffle the order of training samples
-df_train = df_train.sample(n = len(df_train)).reset_index(drop = True)
-
-df_train
-
-X_train = df_train.loc[:, df_train.columns != 'readmitted']
-y_train=df_train['readmitted']
-X_valid =  df_valid.loc[:, df_valid.columns != 'readmitted']
-y_valid=df_valid['readmitted']
-
-X_test =  df_test.loc[:, df_test.columns != 'readmitted']
-y_test=df_test['readmitted']
+# 분할 데이터 크기 확인
+print(X_train.shape, X_val.shape, y_train.shape, y_val.shape)
 
 from sklearn.preprocessing import StandardScaler
 
-scaler  = StandardScaler()
-scaler.fit(X_train)
+scaler = StandardScaler()
 
-df_train.describe()
+# StandardScaler 적용
+X_train_scaled = scaler.fit_transform(X_train)
+X_val_scaled = scaler.transform(X_val)
 
-X_train_tf = scaler.transform(X_train)
-X_valid_tf = scaler.transform(X_valid)
+from imblearn.over_sampling import SMOTE
 
-X_test_tf = scaler.transform(X_test)
+# 훈련 데이터 소수 클래스 증강
+smote = SMOTE(sampling_strategy='auto', random_state=RANDOM_STATE)
+X_train_res, y_train_res = smote.fit_resample(X_train_scaled, y_train)
 
-y_test
+# 데이터 증강 확인
+y_train_res.value_counts()
 
-pd.DataFrame(X_train_tf)[9].unique()
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
 
-X_train.shape
+# 평가지표 출력 함수
+def print_performance_metrics(model, X_valid, y_valid, y_pred):
+  print('classification report:')
+  print(classification_report(y_valid, y_pred))
 
-X_train_tf.shape
+  print('confusion matrix:')
+  conf_matrix = confusion_matrix(y_valid, y_pred)
+  print(conf_matrix)
 
-from sklearn.metrics import roc_auc_score, accuracy_score, precision_score, recall_score
-def calc_specificity(y_actual, y_pred, thresh):
-    # calculates specificity
-    return sum((y_pred < thresh) & (y_actual == 0)) /sum(y_actual ==0)
+  # Confusion Matrix에서 특이도 계산
+  tn, fp, fn, tp = conf_matrix.ravel()
+  specificity = tn / (tn + fp)
+  print(f"Specificity (True Negative Rate): {specificity:.4f}")
 
-def print_report(y_actual, y_pred, thresh):
+  # Scikit-learn 모델일 경우
+  if hasattr(model, 'predict_proba'):
+    # Scikit-learn 모델은 predict_proba 사용
+    print(roc_auc_score(y_valid, model.predict_proba(X_valid)[:, 1]))
+  else:
+    # Keras 모델일 경우 predict 사용 (Keras는 확률값을 predict로 반환)
+    print(roc_auc_score(y_valid, model.predict(X_valid).ravel()))
 
-    auc = roc_auc_score(y_actual, y_pred)
-    accuracy = accuracy_score(y_actual, (y_pred > thresh))
-    recall = recall_score(y_actual, (y_pred > thresh))
-    precision = precision_score(y_actual, (y_pred > thresh))
-    specificity = calc_specificity(y_actual, y_pred, thresh)
-    print('AUC:%.3f'%auc)
-    print('accuracy:%.3f'%accuracy)
-    print('recall:%.3f'%recall)
-    print('precision:%.3f'%precision)
-    print('specificity:%.3f'%specificity)
-    print('prevalence:%.3f'%calc_prevalence(y_actual))
-    print(' ')
-    return auc, accuracy, recall, precision, specificity
+from sklearn.model_selection import RandomizedSearchCV # 하이퍼파라미터 튜닝
 
-thresh = 0.5
+# 1. 랜덤 포레스트
+from sklearn.ensemble import RandomForestClassifier
+
+rf_param_distributions = {
+    'n_estimators': [100, 200, 300, 400, 500],  # 트리의 개수
+    'max_depth': [10, 20, 30, 40, 50],  # 트리의 최대 깊이
+    'min_samples_split': [2, 5, 10],  # 노드 분할을 위한 최소 샘플 수
+    'min_samples_leaf': [1, 2, 4],  # 리프 노드의 최소 샘플 수
+    'bootstrap': [True, False]  # 부트스트랩 샘플링 사용 여부
+}
+
+# 랜덤 포레스트 모델 생성
+rf_model = RandomForestClassifier(random_state=RANDOM_STATE)
+
+# RandomizedSearchCV 객체 생성
+random_search = RandomizedSearchCV(
+    estimator=rf_model,
+    param_distributions=rf_param_distributions,
+    n_iter=10,  # 탐색할 조합 수
+    scoring='accuracy',
+    cv=3,
+    verbose=3,
+    random_state=RANDOM_STATE,
+    n_jobs=-1
+)
+
+# 하이퍼파라미터 탐색 수행
+random_search.fit(X_train_res, y_train_res)
+
+# 최적의 파라미터 출력
+print(f"Best parameters found: {random_search.best_params_}")
+
+# 최적의 모델을 기반으로 예측 수행
+best_rf_model = random_search.best_estimator_
+y_pred_rf = best_rf_model.predict(X_val_scaled)
+
+# 성능 평가
+print_performance_metrics(best_rf_model, X_val_scaled, y_val, y_pred_rf)
+
+# 2. XGBoost
+from xgboost import XGBClassifier
+
+xgb_param_distributions = {
+    'n_estimators': [100, 200, 300, 400],  # 트리의 개수
+    'learning_rate': [0.01, 0.05, 0.1, 0.2],  # 학습률
+    'max_depth': [3, 5, 6, 10],  # 트리의 최대 깊이
+    'min_child_weight': [1, 3, 5],  # 최소 자식 노드의 가중치 합
+    'subsample': [0.6, 0.8, 1.0],  # 각 트리에 사용할 데이터 샘플링 비율
+    'colsample_bytree': [0.6, 0.8, 1.0],  # 각 트리에 사용할 특성 샘플링 비율
+    'gamma': [0, 0.1, 0.3, 0.5],  # 리프 노드 추가 분할의 최소 손실 감소 값
+    'reg_alpha': [0, 0.01, 0.1, 1],  # L1 정규화 가중치
+    'reg_lambda': [0.01, 0.1, 1, 10],  # L2 정규화 가중치
+}
+
+xgb_model = XGBClassifier(random_state=RANDOM_STATE)
+
+random_search_xgb = RandomizedSearchCV(
+    estimator=xgb_model,
+    param_distributions=xgb_param_distributions,
+    n_iter=10,  # 탐색할 조합 수
+    scoring='accuracy',
+    cv=3,
+    verbose=3,
+    random_state=RANDOM_STATE,
+    n_jobs=-1
+)
+
+random_search_xgb.fit(X_train_res, y_train_res)
+# 최적의 파라미터 출력
+print(f"Best parameters found for XGBoost: {random_search_xgb.best_params_}")
+
+# 최적의 모델을 기반으로 예측 수행
+best_xgb_model = random_search_xgb.best_estimator_
+y_pred_xgb = best_xgb_model.predict(X_val_scaled)
+
+# 성능 평가
+print_performance_metrics(best_xgb_model, X_val_scaled, y_val, y_pred_xgb)
+
+# 3. LGBM
+from lightgbm import LGBMClassifier
+
+lgbm_param_distributions = {
+    'n_estimators': [100, 200, 300, 400],  # 트리의 개수
+    'learning_rate': [0.01, 0.05, 0.1, 0.2],  # 학습률
+    'num_leaves': [20, 30, 50, 70],  # 리프 노드의 최대 개수
+    'max_depth': [-1, 10, 20, 30],  # 트리의 최대 깊이 (-1은 제한 없음)
+    'min_child_samples': [10, 20, 30],  # 최소 자식 샘플 수
+    'subsample': [0.6, 0.8, 1.0],  # 각 트리에 사용할 데이터 샘플링 비율
+    'colsample_bytree': [0.6, 0.8, 1.0],  # 각 트리에 사용할 특성 샘플링 비율
+    'reg_alpha': [0, 0.01, 0.1, 1],  # L1 정규화
+    'reg_lambda': [0.01, 0.1, 1, 10],  # L2 정규화
+}
+
+lgbm_model = LGBMClassifier(random_state=RANDOM_STATE)
+
+random_search_lgbm = RandomizedSearchCV(
+    estimator=lgbm_model,
+    param_distributions=lgbm_param_distributions,
+    n_iter=10,  # 탐색할 조합 수
+    scoring='accuracy',
+    cv=3,
+    verbose=3,
+    random_state=RANDOM_STATE,
+    n_jobs=-1
+)
+
+random_search_lgbm.fit(X_train_res, y_train_res)
+
+# 최적의 파라미터 출력
+print(f"Best parameters found for LGBM: {random_search_lgbm.best_params_}")
+
+# 최적의 모델을 기반으로 예측 수행
+best_lgbm_model = random_search_lgbm.best_estimator_
+y_pred_lgbm = best_lgbm_model.predict(X_val_scaled)
+
+# 성능 평가
+print_performance_metrics(best_lgbm_model, X_val_scaled, y_val, y_pred_lgbm)
+
+!pip install catboost
+
+# 4. CatBoost
+from catboost import CatBoostClassifier
+
+# CatBoost의 하이퍼파라미터 공간 설정
+cat_param_distributions = {
+    'iterations': [500, 1000, 1500],  # 트리의 개수 (또는 부스팅 단계의 수)
+    'learning_rate': [0.01, 0.05, 0.1, 0.2],  # 학습률
+    'depth': [4, 6, 8, 10],  # 트리의 최대 깊이
+    'l2_leaf_reg': [1, 3, 5, 7],  # L2 정규화 계수
+    'border_count': [32, 64, 128],  # 학습에 사용될 비닝된 경계의 수
+    'bagging_temperature': [0, 1, 2, 3],  # 부스팅 샘플링의 온도 조절 (0일 경우 부스트라운드마다 데이터 샘플링이 동일)
+    'random_strength': [1, 2, 5, 10],  # 트리 구조를 무작위로 생성할 때의 강도
+}
+
+cat_model = CatBoostClassifier(random_state=RANDOM_STATE, verbose=0)
+
+random_search_cat = RandomizedSearchCV(
+    estimator=cat_model,
+    param_distributions=cat_param_distributions,
+    n_iter=10,  # 탐색할 조합 수
+    scoring='accuracy',
+    cv=3,
+    verbose=3,
+    random_state=RANDOM_STATE,
+    n_jobs=-1
+)
+
+random_search_cat.fit(X_train_res, y_train_res)
+
+# 최적의 파라미터 출력
+print(f"Best parameters found for CatBoost: {random_search_cat.best_params_}")
+
+# 최적의 모델을 기반으로 예측 수행
+best_cat_model = random_search_cat.best_estimator_
+y_pred_cat = best_cat_model.predict(X_val_scaled)
+
+# 성능 평가
+print_performance_metrics(best_cat_model, X_val_scaled, y_val, y_pred_cat)
+
+!pip install pytorch_tabnet
+
+# 5. tabnet
+from pytorch_tabnet.tab_model import TabNetClassifier
+
+X_val = X_val.astype(float)
+tabnet_model = TabNetClassifier()
+tabnet_model.fit(
+    X_train=X_train_res, y_train=y_train_res,
+    eval_set=[(X_val.values, y_val)],
+    eval_metric=['accuracy'],
+    max_epochs=10,
+    patience=20,
+    batch_size=1024,
+    virtual_batch_size=128,
+    num_workers=0,
+    drop_last=False
+)
+
+y_pred_tab = tabnet_model.predict(X_val.values)
+
+print_performance_metrics(tabnet_model, X_val.values, y_val, y_pred_tab)
+
+!pip install tensorflow
+
+# 6. CNN
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Conv1D, MaxPooling1D, Flatten, Dense, Dropout
+from tensorflow.keras.callbacks import EarlyStopping
+
+# CNN을 위한 입력 형태로 변환 (samples, timesteps, features)
+X_train_cnn = X_train_res.reshape(X_train_res.shape[0], X_train_res.shape[1], 1)
+X_val_cnn = X_val_scaled.reshape(X_val_scaled.shape[0], X_val_scaled.shape[1], 1)
+
+model = Sequential()
+
+model.add(Conv1D(filters=64, kernel_size=3, activation='relu', input_shape=(X_train_cnn.shape[1], 1)))
+model.add(MaxPooling1D(pool_size=2))
+model.add(Dropout(0.5))
+
+model.add(Conv1D(filters=128, kernel_size=3, activation='relu'))
+model.add(MaxPooling1D(pool_size=2))
+model.add(Dropout(0.5))
+
+model.add(Flatten())
+model.add(Dense(64, activation='relu'))
+model.add(Dropout(0.5))
+
+model.add(Dense(1, activation='sigmoid'))
+
+model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+# EarlyStopping 콜백 정의
+early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+
+
+# 모델 학습
+history = model.fit(
+    X_train_cnn, y_train_res,
+    epochs=50,
+    batch_size=64,
+    validation_data=(X_val_cnn, y_val),
+    callbacks=[early_stopping]
+)
+
+# 모델 예측
+y_pred_cnn = (model.predict(X_val_cnn) > 0.5).astype("int32")  # 시그모이드 출력으로 이진 분류
+
+# 성능 평가
+print_performance_metrics(model, X_val_cnn, y_val, y_pred_cnn)
